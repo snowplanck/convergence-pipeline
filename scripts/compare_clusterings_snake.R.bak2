@@ -1,0 +1,319 @@
+#!/usr/bin/env Rscript
+# Module 6 — clustering comparison: function-based vs identity-based
+
+suppressPackageStartupMessages({
+  library(stats)
+})
+
+# Snakemake I/O
+trait_matrix_file <- snakemake@input[["trait_matrix"]]
+orthogroups_file <- snakemake@input[["orthogroups"]]
+functional_out <- snakemake@output[["functional"]]
+identity_out <- snakemake@output[["identity"]]
+comparison_out <- snakemake@output[["comparison"]]
+method <- snakemake@params[["method"]]
+
+cat(sprintf("Clustering comparison: method=%s\n", method))
+
+# Load matrices
+trait_mat <- read.delim(
+  trait_matrix_file,
+  row.names = 1,
+  check.names = FALSE
+)
+
+og_mat <- read.delim(
+  orthogroups_file,
+  row.names = 1,
+  check.names = FALSE
+)
+
+cat(sprintf(
+  "Matrices: trait=%dx%d, og=%dx%d\n",
+  nrow(trait_mat),
+  ncol(trait_mat),
+  nrow(og_mat),
+  ncol(og_mat)
+))
+
+# ------------------------------------------------------------
+# Ensure both matrices contain exactly the same genomes
+# ------------------------------------------------------------
+
+common_genomes <- intersect(
+  colnames(trait_mat),
+  colnames(og_mat)
+)
+
+if (length(common_genomes) < 2) {
+  stop("Less than two genomes are shared between the two matrices.")
+}
+
+trait_mat <- trait_mat[, common_genomes, drop = FALSE]
+og_mat <- og_mat[, common_genomes, drop = FALSE]
+
+cat(sprintf(
+  "Common genomes: %d\n",
+  length(common_genomes)
+))
+
+# ------------------------------------------------------------
+# Functional distance
+# ------------------------------------------------------------
+
+trait_dist <- tryCatch({
+  as.dist(
+    1 - cor(
+      t(trait_mat),
+      use = "pairwise.complete.obs"
+    )
+  )
+}, error = function(e) {
+  dist(t(trait_mat))
+})
+
+# Replace invalid distances
+if (any(is.na(trait_dist)) || any(is.infinite(trait_dist))) {
+
+  finite_values <- trait_dist[
+    is.finite(trait_dist)
+  ]
+
+  if (length(finite_values) == 0) {
+    stop("Functional distance matrix contains no finite values.")
+  }
+
+  max_d <- max(finite_values)
+
+  trait_dist[
+    is.na(trait_dist) | is.infinite(trait_dist)
+  ] <- max_d
+}
+
+# ------------------------------------------------------------
+# Identity distance
+# ------------------------------------------------------------
+
+# Orthogroups are rows and genomes are columns,
+# therefore transpose the matrix before calculating distances.
+og_dist <- dist(
+  t(og_mat),
+  method = "binary"
+)
+
+# ------------------------------------------------------------
+# Hierarchical clustering
+# ------------------------------------------------------------
+
+hc_identity <- hclust(
+  og_dist,
+  method = "ward.D2"
+)
+
+hc_functional <- hclust(
+  trait_dist,
+  method = "ward.D2"
+)
+
+# Two clusters for the toy/test dataset
+n_cl <- 2
+
+id_cl <- cutree(
+  hc_identity,
+  k = n_cl
+)
+
+func_cl <- cutree(
+  hc_functional,
+  k = n_cl
+)
+
+# ------------------------------------------------------------
+# Create clustering tables
+# ------------------------------------------------------------
+
+identity_df <- data.frame(
+  genome = names(id_cl),
+  cluster = as.integer(id_cl),
+  stringsAsFactors = FALSE
+)
+
+functional_df <- data.frame(
+  genome = names(func_cl),
+  cluster = as.integer(func_cl),
+  stringsAsFactors = FALSE
+)
+
+# ------------------------------------------------------------
+# Force identical genome order
+# ------------------------------------------------------------
+
+identity_df <- identity_df[
+  match(common_genomes, identity_df$genome),
+  ,
+  drop = FALSE
+]
+
+functional_df <- functional_df[
+  match(common_genomes, functional_df$genome),
+  ,
+  drop = FALSE
+]
+
+# ------------------------------------------------------------
+# Sanity checks
+# ------------------------------------------------------------
+
+if (nrow(identity_df) != nrow(functional_df)) {
+  stop(
+    "Functional and identity clustering contain different numbers of genomes."
+  )
+}
+
+if (!all(as.character(identity_df$genome) == as.character(functional_df$genome))) {
+  stop("Genome order differs between functional and identity clustering.")
+}
+
+cat(sprintf(
+  "Clustering genomes: functional=%d, identity=%d\n",
+  nrow(functional_df),
+  nrow(identity_df)
+))
+
+# ------------------------------------------------------------
+# Write clustering results
+# ------------------------------------------------------------
+
+write.table(
+  identity_df,
+  identity_out,
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
+
+write.table(
+  functional_df,
+  functional_out,
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
+
+# ------------------------------------------------------------
+# Adjusted Rand Index
+# ------------------------------------------------------------
+
+contingency <- table(
+  functional_df$cluster,
+  identity_df$cluster
+)
+
+n <- sum(contingency)
+
+if (n > 1) {
+
+  sum_comb <- sum(
+    choose(contingency, 2)
+  )
+
+  row_combs <- sum(
+    choose(rowSums(contingency), 2)
+  )
+
+  col_combs <- sum(
+    choose(colSums(contingency), 2)
+  )
+
+  expected <- (
+    row_combs * col_combs
+  ) / choose(n, 2)
+
+  max_possible <- (
+    row_combs + col_combs
+  ) / 2
+
+  ari <- ifelse(
+    max_possible == expected,
+    0,
+    (sum_comb - expected) /
+      (max_possible - expected)
+  )
+
+} else {
+
+  ari <- 0
+
+}
+
+# ------------------------------------------------------------
+# Mantel-like correlation
+# ------------------------------------------------------------
+
+mantel_r <- tryCatch({
+
+  m1 <- as.vector(
+    as.matrix(trait_dist)
+  )
+
+  m2 <- as.vector(
+    as.matrix(og_dist)
+  )
+
+  cor(
+    m1,
+    m2,
+    use = "complete.obs"
+  )
+
+}, error = function(e) {
+
+  NA
+
+})
+
+cat(sprintf(
+  "ARI = %.4f, Mantel r = %.4f\n",
+  ari,
+  mantel_r
+))
+
+# ------------------------------------------------------------
+# Report
+# ------------------------------------------------------------
+
+interpretation <- ifelse(
+  ari > 0.7,
+  "High concordance: functional and taxonomic clustering agree.",
+  ifelse(
+    ari > 0.3,
+    "Moderate divergence: some functional convergence detected.",
+    "High divergence: widespread functional convergence or HGT."
+  )
+)
+
+report <- sprintf(
+"# Clustering Comparison
+
+- Functional clusters: %d
+- Identity clusters: %d
+- Adjusted Rand Index: %.4f
+- Mantel correlation: %.4f
+
+%s
+",
+  n_cl,
+  n_cl,
+  ari,
+  mantel_r,
+  interpretation
+)
+
+writeLines(
+  report,
+  comparison_out
+)
+
+cat(
+  "Clustering comparison complete.\n"
+)

@@ -1,0 +1,229 @@
+================================================================================
+  MANUAL DO USUARIO — Pipeline de Deteccao de Convergencia Funcional Baseada
+  em Estruturas 3D
+================================================================================
+
+Versao: 1.0
+Data: 2026
+Idioma: Portugues (BR)
+
+================================================================================
+  1. VISAO GERAL
+================================================================================
+
+Este programa implementa um pipeline de bioinformatica para detectar
+convergencia funcional entre genes nao-homologos — casos onde proteinas
+de diferentes origens evolutivas chegam independentemente mesma funcao
+biologica (enzimas nao-homologas e isofuncionais, conhecidas como NISE —
+Non-homologous Isofunctional Enzymes).
+
+O pipeline combina tres camadas de evidencia:
+  1. Evidencia por homologia (analise de core genoma tradicional)
+  2. Evidencia estrutural independente de homologia (predicao de dobras 3D)
+  3. Flag de convergencia (cruzamento das camadas 1 e 2)
+
+================================================================================
+  2. ARQUITETURA DO PROGRAMA
+================================================================================
+
+O sistema e composto por:
+
+  * Snakefile              — Orquestracao das regras (Snakemake)
+  * app.py                 — Interface grafica (Streamlit) com 5 paginas
+  * config.yaml            — Configuracoes do pipeline
+  * scripts/               — Scripts auxiliares por ferramenta
+  * environments/          — Ambientes Conda (ML, anotacao, R)
+  * data/toy_genomes/      — Genomas de teste (3 genomas pequenos)
+  * data/toy_positive_controls/ — Controles positivos sinteticos
+  * tests/test_schemas.py  — Testes de validacao de schema
+
+================================================================================
+  3. MODULOS DO PIPELINE
+================================================================================
+
+Modulo 0 — Preprocessamento (Prokka/Bakta)
+  Chama genes, extrai sequencias de proteinas e metadados dos genomas.
+
+Modulo 1 — Duplicacao (dRep + MMseqs2)
+  Agrupa genomas quase-identicos e agrupa proteinas similares (>95%).
+
+Modulo 2 — Anotacao por Homologia (Branch A)
+  Executa OrthoFinder, eggNOG-mapper, KofamScan, InterProScan.
+  Resolve anotacoes para a maioria das proteinas de forma barata.
+
+Modulo 3 — Anotacao Estrutural (Branch B — Triagem em etapas)
+  B1: ML de sequencia (ProteInfer/CLEAN) — GPU barata
+  B2: ProstT5 → 3Di → Foldseek — GPU barata
+  B3: Dobramento 3D completo (ESMFold/DeepFRI) — GPU cara
+
+  IMPORTANTE: cada etapa recebe apenas o RESIDUO (proteinas nao resolvidas)
+  da etapa anterior, nunca o conjunto completo.
+
+Modulo 4 — Matriz de tracos combinada
+  Gera matriz genoma x traco com anotacao de procedencia.
+
+Modulo 5 — Deteccao de NISE
+  Identifica eventos de convergencia candidatos.
+
+Modulo 6 — Agrupamento funcional vs. por identidade
+  Compara agrupamentos baseados em funcao vs. homologia.
+
+Modulo 7 — Validacao
+  Verifica recuperacao de controles positivos conhecidos.
+
+================================================================================
+  4. REQUISITOS DE SISTEMA
+================================================================================
+
+  * Sistema: Linux ou macOS com GPU NVIDIA (>= 8GB VRAM)
+  * Gerenciador: Conda ou Mamba
+  * Espaco em disco: ~50 GB para bancos de dados
+  * Snakemake >= 8.0
+  * Python >= 3.10
+  * R >= 4.3
+
+================================================================================
+  5. INSTALACAO
+================================================================================
+
+Passo 1 — Instalar dependencias da interface grafica:
+  pip install -r requirements.txt
+
+Passo 2 — Criar ambientes Conda:
+  conda env create -f environments/annotation.yml
+  conda env create -f environments/ml.yml
+  conda env create -f environments/r.yml
+
+Passo 3 — Gerar dados de teste:
+  python scripts/generate_toy_data_standalone.py
+
+Passo 4 — Baixar bancos de dados (uma vez; cacheado para reuso):
+
+  # AlphaFold DB:
+  mkdir -p databases/alphafold
+  # Baixar por organismo de https://alphafold.ebi.ac.uk/
+
+  # Foldseek (CATH, SCOP, PDB):
+  mkdir -p databases/foldseek
+  foldseek databases CATH databases/foldseek/cath tmp
+
+  # eggNOG:
+  download_eggnog_data.py -y -P -M
+
+================================================================================
+  6. USO NO MODO TESTE (Recomendado para primeira execucao)
+================================================================================
+
+O modo teste substitui etapas pesadas de GPU (ESMFold, DeepFRI) por mocks rapidos,
+permitindo validar o pipeline em minutos sem GPU ou downloads grandes.
+
+Opcao A — Pela interface grafica:
+  streamlit run app.py
+  # Na pagina Setup: genome_dir = data/toy_genomes, test_mode = True
+  # Na pagina Run: clique Start pipeline
+
+Opcao B — Pela linha de comando:
+  snakemake --cores 4 --software-deployment-method conda \
+            --conda-frontend mamba \
+            --config test_mode=true genome_dir=data/toy_genomes
+
+Os dados de teste incluem dois controles positivos sinteticos:
+
+  a) Caso NISE: proteinas NISE_A e NISE_B — sequencias diferentes,
+     dobras diferentes, mesma EC:3.4.21.1
+     → DEVE aparecer em nise_candidates.tsv
+
+  b) Caso homologo: HOM_amylase_1 e HOM_amylase_2 — 95% de identidade,
+     mesmo OG, EC:3.2.1.1
+     → NAO DEVE aparecer em nise_candidates.tsv
+
+================================================================================
+  7. USO EM ESCALA COMPLETA
+================================================================================
+
+Para executar com todos os dados e etapas reais:
+
+  snakemake --cores 8 --software-deployment-method conda \
+            --conda-frontend mamba --resources gpu=1 \
+            --config test_mode=false genome_dir=/caminho/para/genomas
+
+O parametro --resources gpu=1 regula as regras com GPU (B2, B3) para que
+o Snakemake as agende corretamente em no com GPU.
+
+================================================================================
+  8. INTERFACE GRAFICA (5 paginas)
+================================================================================
+
+Pagina Setup:
+  Configura diretorio de genomas, thresholds, modo teste.
+
+Pagina Run:
+  Inicia o pipeline, exibe logs em tempo real.
+
+Pagina Monitor:
+  Mostra grafunil de triagem e tempo por etapa
+  (lê pipeline_run_stats.tsv).
+
+Pagina Results:
+  Matriz de tracos e candidatos NISE, filtraveis por
+  procedencia e confianca.
+
+Pagina Validation:
+  Renderiza validation_report.md com recuperacao de controles.
+
+================================================================================
+  9. ARQUIVOS DE SAIDA
+================================================================================
+
+  results/orthogroups.tsv              — presença/ausência de OGs
+  results/trait_matrix_combined.tsv    — matriz traco x genoma
+  results/trait_provenance.tsv         — coluna de procedencia
+  results/nise_candidates.tsv          — confiança 0–1
+  results/functional_clusters.tsv      — genoma x cluster funcional
+  results/identity_clusters.tsv        — genoma x cluster por identidade
+  results/validation_report.md         — recuperacao de controles
+  results/pipeline_run_stats.tsv       — estagiar x proteinas x tempo x GPU
+
+================================================================================
+  10. TESTES DE VALIDACAO
+================================================================================
+
+Para executar testes de schema nas saidas:
+
+  RUN_PIPELINE_BEFORE_TEST=1 pytest tests/test_schemas.py -v
+
+Valida nomes de colunas, tipos, intervalos de valores e comportamentos
+dos dois controles positivos.
+
+================================================================================
+  11. SOLUCAO DE PROBLEMAS COMUNS
+================================================================================
+
+Problema: "Python not found"
+Solucao: Alias do Windows Store. Desabilite em
+  Configuracoes > Aplicativos > Atalhos de execucao do aplicativo
+
+Problema: Falta de GPU
+Solucao: Execute em modo teste (test_mode=true)
+
+Problema: conda env falha ao criar
+Solucao: Tente usar Mamba: conda install mamba -n base -c conda-forge
+
+Proplema: snakefile nao encontra regras GPU
+Solucao: Verifique --resources gpu=1 na linha de comando
+
+================================================================================
+  12. NOTAS IMPORTANTES
+================================================================================
+
+* As chaves em config.yaml sao mantidas sincronizadas com app.py.
+  Renomeie uma chave em ambos os arquivos simultaneamente.
+
+* Regras com resources: gpu=1 sao B1, B2, B3 (etapas da Branch B).
+
+* Arquivos intermediarios vao para results/intermediate/
+  saidas finais vao para results/
+
+================================================================================
+  FIM DO MANUAL
+================================================================================

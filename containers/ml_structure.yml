@@ -1,0 +1,21 @@
+name: ml_structure
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch>=2.1
+  - cudatoolkit=12.1
+  - transformers>=4.35
+  - accelerate>=0.24
+  - sentencepiece>=0.1
+  - biopython>=1.8
+  - pandas>=1.5
+  - pip
+  - pip:
+    - fair-esm
+    - deepfri
+    - clean-nn
+    - foldseek-python

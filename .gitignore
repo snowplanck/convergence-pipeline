@@ -1,0 +1,31 @@
+# Snakemake
+.snakemake/
+
+# Generated outputs
+results/
+logs/
+temp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Large/generated computational files
+*.log
+*.tmp
+*.cache
+
+# Conda / model caches
+.conda/
+conda_pkgs/

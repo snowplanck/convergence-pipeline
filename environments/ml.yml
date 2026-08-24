@@ -1,0 +1,21 @@
+name: ml
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pytorch=2.1.2
+  - torchvision=0.16.2
+  - pytorch-cuda=12.1
+  - transformers=4.37.2
+  - accelerate=0.25.0
+  - sentencepiece=0.1.99
+  - biopython=1.83
+  - pandas=2.1.4
+  - pip
+  - pip:
+      - fair-esm==2.0.0

@@ -1,0 +1,41 @@
+{
+  "description": "Known convergent enzyme positive controls for pipeline validation",
+  "controls": [
+    {
+      "ec": "3.4.21.4",
+      "description": "Trypsin-like serine protease — S1 fold",
+      "fold_a": "3.40.50",
+      "fold_b": "2.40.10",
+      "proteins": [],
+      "note": "Classic subtilisin vs trypsin convergence (same serine protease function, unrelated folds)"
+    },
+    {
+      "ec": "3.4.21.5",
+      "description": "Thrombin — S1 fold, convergent with subtilisin",
+      "fold_a": "3.40.50",
+      "fold_b": "2.40.10",
+      "proteins": []
+    },
+    {
+      "ec": "1.1.1.1",
+      "description": "Alcohol dehydrogenase — multiple independent origins",
+      "fold_a": "3.40.50",
+      "fold_b": "3.90.180",
+      "proteins": []
+    },
+    {
+      "ec": "4.1.1.1",
+      "description": "Aspartate decarboxylase — convergent evolution in different folds",
+      "fold_a": "2.40.30",
+      "fold_b": "3.20.20",
+      "proteins": []
+    },
+    {
+      "ec": "3.1.3.1",
+      "description": "Alkaline phosphatase — different folds, same function",
+      "fold_a": "3.40.718",
+      "fold_b": "3.60.21",
+      "proteins": []
+    }
+  ]
+}
