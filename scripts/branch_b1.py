@@ -3,8 +3,13 @@
 Input: unresolved proteins from homology triage + trait candidates (residual set).
 Output: predictions table, resolved FASTA, still-unresolved FASTA.
 Only processes the residual, NOT the full protein set."""
+import os
+import subprocess
+import tempfile
 import time
 from pathlib import Path
+
+import tool_utils as tu
 
 unresolved_in = snakemake.input["unresolved"]
 trait_candidates_in = snakemake.input["trait_candidates"]
@@ -12,8 +17,14 @@ predictions_out = snakemake.output["predictions"]
 resolved_out = snakemake.output["resolved"]
 still_unresolved_out = snakemake.output["still_unresolved"]
 confidence = float(snakemake.params["confidence"])
-test_mode = bool(snakemake.params["test_mode"])
+test_mode = tu.parse_bool(snakemake.params["test_mode"])
+external_tools_dir = snakemake.params.get("external_tools_dir", "")
+b1_method = str(snakemake.params.get("b1_method", "auto")).lower()
+outdir = snakemake.params.get("outdir", "results")
 log_file = snakemake.log[0]
+
+tu.prepend_tools_dir(external_tools_dir)
+tool_report = Path(outdir) / "tool_availability.tsv"
 
 for p in [predictions_out, resolved_out, still_unresolved_out]:
     Path(p).parent.mkdir(parents=True, exist_ok=True)
@@ -66,13 +77,70 @@ if test_mode:
         else:
             unresolved.append(prot)
 else:
-    # Try real ProteInfer/CLEAN
-    try:
-        # Placeholder for actual tool call
-        raise FileNotFoundError
-    except FileNotFoundError:
-        for prot in proteins:
-            unresolved.append(prot)
+    # ---- Real mode: ProteInfer / CLEAN (sequence-only EC/GO prediction) ----
+    device = tu.detect_device(snakemake.params.get("force_device", "auto"))
+    # Resolve which tool to call.
+    # Priority: explicit b1_method -> locate binary on PATH (or external_tools_dir).
+    candidate_cmds = []
+    if b1_method in ("proteinfer", "proteinfier", "auto"):
+        candidate_cmds.append("proteinfer")
+    if b1_method in ("clean", "clean_predict", "auto"):
+        candidate_cmds.append("clean_predict")
+    tool_bin = None
+    for cmd in candidate_cmds:
+        if tu.which(cmd):
+            tool_bin = cmd
+            break
+
+    ok = bool(tool_bin)
+    detail = (f"binary '{tool_bin}' found" if tool_bin
+              else "no ProteInfer/CLEAN binary found on PATH "
+                   "(set config b1_method + install the tool, or point "
+                   "external_tools_dir at its location)")
+    tu.record_tool(tool_report, "proteinfer/clean", "B1", ok, detail, device)
+    with open(log_file, "a") as log:
+        log.write(f"B1 real-mode tool: {tool_bin or 'NONE'} (device={device}); {detail}\n")
+
+    if tool_bin:
+        # Write residual FASTA and invoke the tool. The tool is expected to read
+        # the FASTA and emit a TSV (protein<TAB>ec<TAB>probability[<TAB>go])
+        # to the path given by --out / stdout.
+        with tempfile.TemporaryDirectory() as td:
+            fasta_path = Path(td) / "b1_input.faa"
+            with open(fasta_path, "w") as f:
+                for prot, seq in seqs.items():
+                    f.write(f">{prot}\n{seq}\n")
+            out_path = Path(td) / "b1_output.tsv"
+            cmd = [tool_bin, "--input", str(fasta_path), "--out", str(out_path),
+                   "--device", device, "--confidence", str(confidence)]
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                # Parse the tool's TSV output.
+                if out_path.exists():
+                    with open(out_path) as f:
+                        for line in f:
+                            cols = line.rstrip("\n").split("\t")
+                            if not cols or not cols[0] or cols[0].startswith("#"):
+                                continue
+                            prot = cols[0]
+                            ec = cols[1] if len(cols) > 1 else ""
+                            prob = float(cols[2]) if len(cols) > 2 and cols[2] else 0.0
+                            if prot in seqs and ec and prob >= confidence:
+                                resolved[prot] = {"tool": tool_bin,
+                                                  "ec": ec, "prob": prob}
+            except Exception as e:
+                with open(log_file, "a") as log:
+                    log.write(f"B1 tool '{tool_bin}' failed ({e}); "
+                              f"marking ALL residual proteins unresolved\n")
+                tu.log_failure(log_file, "ProteInfer/CLEAN",
+                               f"tool errored: {e}")
+    else:
+        with open(log_file, "a") as log:
+            log.write("B1: no sequence-only ML tool available; "
+                      "marking residual proteins unresolved (honest no-hit)\n")
+        tu.log_failure(log_file, "ProteInfer/CLEAN", detail)
+
+    unresolved = [p for p in proteins if p not in resolved]
 
 with open(predictions_out, "w") as f:
     f.write("protein\ttool\tec\tprobability\tresolved\n")

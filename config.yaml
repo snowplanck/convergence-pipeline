@@ -17,7 +17,7 @@ nise_min_tools: 2
 cluster_method: apcluster
 mantel_permutations: 999
 test_mode: true
-gpu_enabled: true
+gpu_enabled: false
 dry_run: false
 max_threads: 8
 max_memory_gb: 32
@@ -27,3 +27,13 @@ foldseek_db: databases/foldseek/v4
 eggnog_db: databases/eggnog
 kofam_dir: databases/kofam
 uniref_dir: databases/uniref
+# Directory containing external tool binaries (prepended to PATH). Empty = rely on PATH.
+external_tools_dir: ''
+# B1 real-mode method: auto | proteinfer | clean
+b1_method: auto
+# B3 folding method: esmfold (single-sequence, default) | colabfold (MSA-based, slow)
+b3_method: esmfold
+# Per-protein timeout (seconds) for the expensive B3 folding stage.
+b3_per_protein_timeout: 1800.0
+# Device preference for GPU-capable steps: auto | cpu | cuda
+force_device: auto

@@ -60,6 +60,44 @@ foldseek databases CATH databases/foldseek/cath tmp
 download_eggnog_data.py -y -P -M
 ```
 
+### Real-mode tool & database requirements
+
+`test_mode=false` runs the genuine tools below. Any tool that is missing
+(or whose database is missing) is reported as **NOT AVAILABLE** in
+`results/tool_availability.tsv` and its proteins are honestly marked
+*unresolved / no-hit* — the pipeline never fabricates a positive annotation.
+
+| Module | Tool | Install | Required database | If missing |
+|--------|------|---------|------------------|------------|
+| Branch A | OrthoFinder | `conda install -c bioconda orthofinder` | — (uses input FASTA) | placeholder OGs |
+| Branch A | eggNOG-mapper | `conda install -c bioconda eggnog-mapper` | `eggnog_db` (`download_eggnog_data.py`) | no-hit |
+| Branch A | KofamScan | `conda install -c bioconda kofamscan` | `kofam_dir` (`kofamscan --download`) | no-hit |
+| Branch A | InterProScan | `conda install -c bioconda interproscan` | bundled | no-hit |
+| Branch B1 | ProteInfer / CLEAN | install + put CLI on `PATH` (or set `external_tools_dir`) | none | no-hit |
+| Branch B2 | ProstT5 (GPU/CPU auto) | `transformers` + `Rostlab/prostt5` weights | — | no-hit |
+| Branch B2 | Foldseek | `conda install -c bioconda foldseek` | `foldseek_db` (see below) | **hard fail** (logged command) |
+| Branch B3 | AlphaFold DB (checked first) | download per-organism mmCIF/PDB | `alphafold_db` | fall through to folding |
+| Branch B3 | ESMFold (GPU/CPU auto) | `transformers` + `fair-esm` | — | no-hit |
+| Branch B3 | ColabFold/AlphaFold2 (only if `b3_method=colabfold`) | `colabfold_predict` on PATH | UniRef/MMCIF DBs | no-hit |
+| Branch B3 | DeepFRI / CLEAN-Contact | install + CLI/`clean` package | — | EC/GO omitted (not fabricated) |
+
+Foldseek reference databases (download once; point `foldseek_db` at the dir):
+
+```bash
+foldseek databases PDB databases/foldseek/pdb tmp
+foldseek databases CATH databases/foldseek/cath tmp
+foldseek databases SCOPe databases/foldseek/scope tmp
+foldseek databases AlphaFoldDB databases/foldseek/afdb tmp
+```
+
+Device handling: every GPU-capable step (ProstT5, ESMFold, DeepFRI) calls
+`torch.cuda.is_available()` and uses the GPU automatically when present, CPU
+otherwise. No ROCm path is assumed. Override with `force_device: auto|cpu|cuda`.
+
+The expensive B3 folding stage is protected by `b3_per_protein_timeout`
+(default 1800 s); a single pathological protein that times out is marked
+unresolved and the run continues.
+
 ## Running in test mode (recommended first run)
 
 Test mode stubs GPU-heavy steps (ESMFold, DeepFRI) with fast mocks so the

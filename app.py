@@ -64,6 +64,16 @@ CONFIG_DEFAULTS = {
     "max_threads": 8,
     "max_memory_gb": 32,
     "db_dir": "databases",
+    "alphafold_db": "databases/alphafold",
+    "foldseek_db": "databases/foldseek/v4",
+    "eggnog_db": "databases/eggnog",
+    "kofam_dir": "databases/kofam",
+    "uniref_dir": "databases/uniref",
+    "external_tools_dir": "",
+    "b1_method": "auto",
+    "b3_method": "esmfold",
+    "b3_per_protein_timeout": 1800.0,
+    "force_device": "auto",
 }
 
 
@@ -177,8 +187,25 @@ def page_setup():
         cfg["gpu_enabled"] = st.checkbox("Request GPU resources",
                                           cfg["gpu_enabled"])
         cfg["max_threads"] = st.number_input("Max threads", 1, 64,
-                                              cfg["max_threads"])
+                                               cfg["max_threads"])
         cfg["dry_run"] = st.checkbox("Snakemake dry-run", cfg["dry_run"])
+
+    with st.expander("External tools & devices (real mode)"):
+        cfg["external_tools_dir"] = st.text_input(
+            "External tools directory (prepended to PATH, optional)",
+            cfg.get("external_tools_dir", ""))
+        cfg["b1_method"] = st.selectbox(
+            "B1 sequence-ML method", ["auto", "proteinfer", "clean"],
+            index=["auto", "proteinfer", "clean"].index(cfg.get("b1_method", "auto")))
+        cfg["b3_method"] = st.selectbox(
+            "B3 folding method", ["esmfold", "colabfold"],
+            index=["esmfold", "colabfold"].index(cfg.get("b3_method", "esmfold")))
+        cfg["b3_per_protein_timeout"] = st.number_input(
+            "B3 per-protein timeout (s)", 30, 86400,
+            float(cfg.get("b3_per_protein_timeout", 1800.0)))
+        cfg["force_device"] = st.selectbox(
+            "Device preference", ["auto", "cpu", "cuda"],
+            index=["auto", "cpu", "cuda"].index(cfg.get("force_device", "auto")))
 
     if st.button(":floppy_disk: Save configuration"):
         save_config(cfg)
@@ -244,6 +271,13 @@ def page_monitor():
         st.subheader("GPU usage per stage")
         gpu_df = df[["stage", "use_gpu"]].drop_duplicates()
         st.dataframe(gpu_df, use_container_width=True)
+
+    # Real-tool availability for this run (honest: used vs unavailable)
+    tool_avail = OUTPUT_FILES["stats"].parent / "tool_availability.tsv"
+    if tool_avail.exists():
+        st.subheader("Real-tool availability (this run)")
+        st.dataframe(load_tsv_safe(tool_avail, "tool_availability.tsv"),
+                     use_container_width=True)
 
     st.subheader("Raw statistics")
     st.dataframe(df, use_container_width=True)

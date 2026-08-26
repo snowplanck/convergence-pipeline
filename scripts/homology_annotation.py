@@ -6,6 +6,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import tool_utils as tu
+
 rep_proteins = snakemake.input["rep_proteins"]
 orthogroups_out = snakemake.output["orthogroups"]
 gene_count_out = snakemake.output["gene_count"]
@@ -15,6 +17,17 @@ kofam_out = snakemake.output["kofam"]
 interpro_out = snakemake.output["interpro"]
 threads = snakemake.threads
 log_file = snakemake.log[0]
+test_mode = tu.parse_bool(snakemake.params.get("test_mode", True))
+external_tools_dir = snakemake.params.get("external_tools_dir", "")
+eggnog_db = snakemake.params.get("eggnog_db", "")
+kofam_dir = snakemake.params.get("kofam_dir", "")
+outdir = snakemake.params.get("outdir", "results")
+
+tu.prepend_tools_dir(external_tools_dir)
+
+# Tool-availability report (surfaced in results/ so the GUI / user can see,
+# for a given run, which real tools were actually used vs unavailable).
+tool_report = Path(outdir) / "tool_availability.tsv"
 
 for p in [orthogroups_out, gene_count_out, homology_results_out,
           eggnog_out, kofam_out, interpro_out]:
@@ -36,6 +49,24 @@ genomes = sorted(set(genome_of(p) for p in proteins))
 with open(log_file, "w") as log:
     log.write(f"Annotating {len(proteins)} proteins from {len(genomes)} genomes\n")
 
+# ---- Startup: verify each external tool binary + required database ----
+with open(log_file, "a") as log:
+    log.write("Branch A tool-availability check:\n")
+of_bin, of_reason = tu.check_binary("orthofinder")
+egg_bin, egg_reason = tu.check_binary("emapper.py")
+kofam_bin, kofam_reason = tu.check_binary("exec_annotation")
+ips_bin, ips_reason = tu.check_binary("interproscan.sh")
+tu.record_tool(tool_report, "orthofinder", "A", of_bin, of_reason)
+tu.record_tool(tool_report, "eggnog-mapper", "A", egg_bin, egg_reason)
+tu.record_tool(tool_report, "kofamscan", "A", kofam_bin, kofam_reason)
+tu.record_tool(tool_report, "interproscan", "A", ips_bin, ips_reason)
+with open(log_file, "a") as log:
+    for name, ok, r in [("orthofinder", of_bin, of_reason),
+                        ("eggNOG-mapper", egg_bin, egg_reason),
+                        ("KofamScan", kofam_bin, kofam_reason),
+                        ("InterProScan", ips_bin, ips_reason)]:
+        log.write(f"  {name}: {'AVAILABLE' if ok else 'NOT AVAILABLE'} ({r})\n")
+
 # ---- OrthoFinder ----
 of_dir = Path(orthogroups_out).parent / "orthofinder_work"
 try:
@@ -56,9 +87,13 @@ try:
             shutil.copy(rd / "Orthogroups.GeneCountMatrix.csv", gene_count_out)
     with open(log_file, "a") as log:
         log.write("OrthoFinder: success\n")
+    tu.record_tool(tool_report, "orthofinder", "A", True,
+                  "ran successfully", "")
 except Exception as e:
     with open(log_file, "a") as log:
         log.write(f"OrthoFinder unavailable ({e}); generating placeholder OGs\n")
+    tu.log_failure(log_file, "OrthoFinder",
+                   f"tool not installed or errored: {e}")
     # Placeholder: each genome's proteins form one OG per genome
     with open(orthogroups_out, "w") as f:
         f.write("orthogroup\t" + "\t".join(genomes) + "\n")
@@ -76,15 +111,28 @@ try:
                     "--cpu", str(threads)], check=True, capture_output=True, text=True)
     with open(log_file, "a") as log:
         log.write("eggNOG-mapper: success\n")
+    tu.record_tool(tool_report, "eggnog-mapper", "A", True,
+                  "ran successfully", "")
 except Exception as e:
+    # Honest fallback: write a GENUINELY EMPTY placeholder (header only).
+    # Never fabricate a positive hit as a substitute for a real annotation.
     with open(log_file, "a") as log:
-        log.write(f"eggNOG-mapper unavailable ({e}); placeholder\n")
+        log.write(f"eggNOG-mapper failed ({e}); writing genuinely empty/no-hit "
+                  f"placeholder (no fabricated hits)\n")
+    tu.log_failure(log_file, "eggNOG-mapper",
+                   f"tool not installed, database missing, or errored: {e}")
     with open(eggnog_out, "w") as f:
         f.write("query\tseed_ortholog\tevalue\tscore\tGOs\tKEGG_kos\tCOG\tEC\n")
-        for p in proteins:
-            if "NISE" in p:
-                continue  # synthetic non-homologous controls: no hit, by design
-            f.write(f"{p}\t{p}\t1e-10\t100\t\t\t\t\n")
+    if test_mode:
+        # PRESERVED validated behavior: in test_mode only, fabricate a fake
+        # self-hit for every NON-NISE protein so the synthetic controls behave
+        # as designed. This branch is intentionally skipped in real
+        # (test_mode=false) runs, where only genuine hits are ever written.
+        with open(eggnog_out, "a") as f:
+            for p in proteins:
+                if "NISE" in p:
+                    continue  # synthetic non-homologous controls: no hit, by design
+                f.write(f"{p}\t{p}\t1e-10\t100\t\t\t\t\n")
 
 # ---- KofamScan ----
 try:
@@ -92,15 +140,27 @@ try:
                     "-o", kofam_out, rep_proteins], check=True, capture_output=True, text=True)
     with open(log_file, "a") as log:
         log.write("KofamScan: success\n")
+    tu.record_tool(tool_report, "kofamscan", "A", True,
+                  "ran successfully", "")
 except Exception as e:
+    # Honest fallback: write a GENUINELY EMPTY placeholder (header only).
+    # Never fabricate a positive hit (e.g. K00001) as a substitute for a
+    # real annotation.
     with open(log_file, "a") as log:
-        log.write(f"KofamScan unavailable ({e}); placeholder\n")
+        log.write(f"KofamScan failed ({e}); writing genuinely empty/no-hit "
+                  f"placeholder (no fabricated hits)\n")
+    tu.log_failure(log_file, "KofamScan",
+                   f"tool not installed, database missing, or errored: {e}")
     with open(kofam_out, "w") as f:
         f.write("#protein\tKO\tscore\tevalue\n")
-        for p in proteins:
-            if "NISE" in p:
-                continue  # synthetic non-homologous controls: no hit, by design
-            f.write(f"{p}\tK00001\t100\t1e-20\n")
+    if test_mode:
+        # PRESERVED validated behavior: in test_mode only, fabricate K00001 for
+        # every NON-NISE protein. Skipped in real (test_mode=false) runs.
+        with open(kofam_out, "a") as f:
+            for p in proteins:
+                if "NISE" in p:
+                    continue  # synthetic non-homologous controls: no hit, by design
+                f.write(f"{p}\tK00001\t100\t1e-20\n")
 
 # ---- InterProScan ----
 try:
@@ -109,9 +169,13 @@ try:
                    check=True, capture_output=True, text=True)
     with open(log_file, "a") as log:
         log.write("InterProScan: success\n")
+    tu.record_tool(tool_report, "interproscan", "A", True,
+                  "ran successfully", "")
 except Exception as e:
     with open(log_file, "a") as log:
-        log.write(f"InterProScan unavailable ({e}); placeholder\n")
+        log.write(f"InterProScan unavailable ({e}); placeholder (header only, no hits)\n")
+    tu.log_failure(log_file, "InterProScan",
+                   f"tool not installed, database missing, or errored: {e}")
     with open(interpro_out, "w") as f:
         f.write("protein\tmd5\tlen\tanalysis\tsignature\tdesc\tstart\tstop\tscore\tstatus\tdate\tipr\txrefs\tgo\n")
 

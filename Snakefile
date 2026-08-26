@@ -104,6 +104,12 @@ rule homology_annotation:
     conda:
         "environments/annotation.yml"
     threads: config["max_threads"]
+    params:
+        test_mode=config["test_mode"],
+        external_tools_dir=config.get("external_tools_dir", ""),
+        eggnog_db=config.get("eggnog_db", ""),
+        kofam_dir=config.get("kofam_dir", ""),
+        outdir=config["outdir"],
     script:
         "scripts/homology_annotation.py"
 
@@ -150,6 +156,10 @@ rule branch_b1:
     params:
         confidence=config["b1_confidence"],
         test_mode=config["test_mode"],
+        external_tools_dir=config.get("external_tools_dir", ""),
+        b1_method=config.get("b1_method", "auto"),
+        force_device=config.get("force_device", "auto"),
+        outdir=config["outdir"],
     script:
         "scripts/branch_b1.py"
 
@@ -172,6 +182,10 @@ rule branch_b2:
         tmscore=config["b2_tmscore"],
         fident=config["b2_fident"],
         test_mode=config["test_mode"],
+        external_tools_dir=config.get("external_tools_dir", ""),
+        foldseek_db=config.get("foldseek_db", ""),
+        force_device=config.get("force_device", "auto"),
+        outdir=config["outdir"],
     script:
         "scripts/branch_b2.py"
 
@@ -192,7 +206,14 @@ rule branch_b3:
     params:
         tmscore=config["b3_tmscore"],
         test_mode=config["test_mode"],
+        external_tools_dir=config.get("external_tools_dir", ""),
         alphafold_db=config.get("alphafold_db", ""),
+        foldseek_db=config.get("foldseek_db", ""),
+        b3_method=config.get("b3_method", "esmfold"),
+        b3_per_protein_timeout=config.get("b3_per_protein_timeout", 1800.0),
+        force_device=config.get("force_device", "auto"),
+        worker_script="scripts/_structure_worker.py",
+        outdir=config["outdir"],
     script:
         "scripts/branch_b3.py"
 

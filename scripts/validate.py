@@ -17,7 +17,8 @@ structure_in = snakemake.input["structure_results"]
 trait_matrix_in = snakemake.input["trait_matrix"]
 report_out = snakemake.output["report"]
 controls_path = snakemake.params["controls"]
-test_mode = bool(snakemake.params.get("test_mode", False))
+import tool_utils as tu
+test_mode = tu.parse_bool(snakemake.params.get("test_mode", False))
 log_file = snakemake.log[0]
 
 Path(report_out).parent.mkdir(parents=True, exist_ok=True)

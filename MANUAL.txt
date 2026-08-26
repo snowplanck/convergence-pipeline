@@ -110,6 +110,41 @@ Passo 4 — Baixar bancos de dados (uma vez; cacheado para reuso):
   # eggNOG:
   download_eggnog_data.py -y -P -M
 
+  ----------------------------------------------------------------------------
+  Requisitos de ferramentas/bancos para o MODO REAL (test_mode=false)
+  ----------------------------------------------------------------------------
+  No modo real as ferramentas sao executadas de verdade. Qualquer ferramenta
+  ausente (ou banco faltante) e reportada como NAO DISPONIVEL em
+  results/tool_availability.tsv e suas proteinas sao honestamente marcadas
+  como SEM ANOTACAO (nunca um resultado falso).
+
+    Modulo     Ferramenta             Banco            Se faltar
+    Branch A   OrthoFinder            -                OGs placebo
+    Branch A   eggNOG-mapper          eggnog_db        sem hit
+    Branch A   KofamScan              kofam_dir        sem hit
+    Branch A   InterProScan           embutido         sem hit
+    Branch B1  ProteInfer / CLEAN    -                sem hit
+    Branch B2  ProstT5 (GPU/CPU)     -                sem hit
+    Branch B2  Foldseek              foldseek_db      FALHA (comando logado)
+    Branch B3  AlphaFold DB          alphafold_db     cai p/ dobramento
+    Branch B3  ESMFold (GPU/CPU)     -                sem hit
+    Branch B3  ColabFold (so se      UniRef/MMCIF     sem hit
+               b3_method=colabfold)
+    Branch B3  DeepFRI/CLEAN-Contact  -               EC/GO omitido
+
+  Bancos do Foldseek (baixar uma vez; apontar foldseek_db ao diretorio):
+    foldseek databases PDB databases/foldseek/pdb tmp
+    foldseek databases CATH databases/foldseek/cath tmp
+    foldseek databases SCOPe databases/foldseek/scope tmp
+    foldseek databases AlphaFoldDB databases/foldseek/afdb tmp
+
+  Dispositivo: etapas com GPU chamam torch.cuda.is_available() e usam GPU
+  automaticamente se presente, senao CPU. Sem suposicao de ROCm. Substituir
+  com force_device: auto|cpu|cuda.
+
+  O estagio B3 e protegido por b3_per_protein_timeout (padrao 1800s); uma
+  proteina que exceder o tempo e marcada nao resolvida e a execucao continua.
+
 ================================================================================
   6. USO NO MODO TESTE (Recomendado para primeira execucao)
 ================================================================================
