@@ -7,12 +7,16 @@ import json
 import time
 from collections import defaultdict
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+import genome_utils
 
 orthogroups_in = snakemake.input["orthogroups"]
 gene_count_in = snakemake.input["gene_count"]
 homology_in = snakemake.input["homology_resolved"]
 structure_in = snakemake.input["structure_results"]
 mapping_in = snakemake.input["mapping"]
+protein_to_genome_in = snakemake.input["protein_to_genome"]
 matrix_out = snakemake.output["matrix"]
 provenance_out = snakemake.output["provenance"]
 orthogroups_out = snakemake.output["orthogroups_out"]
@@ -22,10 +26,9 @@ log_file = snakemake.log[0]
 for p in [matrix_out, provenance_out, orthogroups_out]:
     Path(p).parent.mkdir(parents=True, exist_ok=True)
 Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+with open(log_file, "w") as _lf:
+    pass  # truncate/create
 t0 = time.time()
-
-def genome_of(pid):
-    return pid.rsplit("_", 1)[0] if "_" in pid else pid.rsplit("|", 1)[0]
 
 def read_fasta_ids(directory):
     ids = set()
@@ -36,18 +39,9 @@ def read_fasta_ids(directory):
                 ids.add(p.stem)
     return ids
 
-# Read derep mapping
-p2r = {}
-if Path(mapping_in).exists():
-    with open(mapping_in) as f:
-        f.readline()
-        for line in f:
-            cols = line.strip().split("\t")
-            if len(cols) >= 3:
-                p2r[cols[0]] = {"rep": cols[1], "genome": cols[2]}
-
+p2g_map = genome_utils.load_protein_to_genome(protein_to_genome_in)
 def resolve_genome(prot):
-    return p2r.get(prot, {}).get("genome", genome_of(prot))
+    return genome_utils.resolve_genome(prot, p2g_map, log_file)
 
 # Read homology resolved list
 resolved_set = set()
@@ -63,7 +57,7 @@ with open(orthogroups_in) as f:
     for line in f:
         cols = line.strip().split("\t")
         if len(cols) >= 2:
-            og[cols[0]] = [c.strip() for c in cols[1:] if c.strip()]
+            og[cols[0]] = [g.strip() for c in cols[1:] if c.strip() for g in c.split(",") if g.strip()]
 
 # Read structure results
 struct = {}
@@ -82,7 +76,7 @@ for prot in list(struct.keys()) + list(resolved_set):
     all_genomes.add(resolve_genome(prot))
 for members in og.values():
     for m in members:
-        all_genomes.add(genome_of(m))
+        all_genomes.add(resolve_genome(m))
 genomes = sorted(all_genomes)
 
 # Build trait data
@@ -114,7 +108,7 @@ for prot, ann in struct.items():
 # Orthogroups
 for og_id, members in og.items():
     for mem in members:
-        add_trait(f"OG:{og_id}", genome_of(mem), "homology", 1.0)
+        add_trait(f"OG:{og_id}", resolve_genome(mem), "homology", 1.0)
 
 def provenance_label(s):
     h, st = "homology" in s, "structure" in s
@@ -153,10 +147,10 @@ with open(orthogroups_out, "w") as f:
     for og_id in sorted(og.keys()):
         row = [og_id]
         for g in genomes:
-            present = any(genome_of(m) == g for m in og[og_id])
+            present = any(resolve_genome(m) == g for m in og[og_id])
             row.append("1" if present else "0")
         f.write("\t".join(row) + "\n")
 
 elapsed = time.time() - t0
-with open(log_file, "w") as log:
+with open(log_file, "a") as log:
     log.write(f"Trait matrix: {len(traits)} traits x {len(genomes)} genomes in {elapsed:.1f}s\n")

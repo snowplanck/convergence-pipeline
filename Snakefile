@@ -56,6 +56,7 @@ rule preprocess:
         proteins=str(INTERDIR / "00_preprocessing" / "all_proteins.faa"),
         metadata=str(INTERDIR / "00_preprocessing" / "genome_metadata.tsv"),
         control_map=str(INTERDIR / "00_preprocessing" / "control_protein_map.tsv"),
+        protein_to_genome=str(INTERDIR / "00_preprocessing" / "protein_to_genome.tsv"),
     log:
         str(LOGDIR / "00_preprocess.log")
     conda:
@@ -71,6 +72,7 @@ rule preprocess:
 rule dereplicate:
     input:
         proteins=str(INTERDIR / "00_preprocessing" / "all_proteins.faa"),
+        protein_to_genome=str(INTERDIR / "00_preprocessing" / "protein_to_genome.tsv"),
     output:
         rep_proteins=str(INTERDIR / "01_dereplication" / "representative_proteins.faa"),
         mapping=str(INTERDIR / "01_dereplication" / "protein_cluster_map.tsv"),
@@ -92,6 +94,7 @@ rule dereplicate:
 rule homology_annotation:
     input:
         rep_proteins=str(INTERDIR / "01_dereplication" / "representative_proteins.faa"),
+        protein_to_genome=str(INTERDIR / "00_preprocessing" / "protein_to_genome.tsv"),
     output:
         orthogroups=str(INTERDIR / "02_homology" / "orthogroups.tsv"),
         gene_count=str(INTERDIR / "02_homology" / "gene_count_matrix.tsv"),
@@ -244,6 +247,7 @@ rule trait_matrix:
         homology_resolved=str(INTERDIR / "02_homology" / "resolved_homology.tsv"),
         structure_results=str(INTERDIR / "03_structure" / "structure_results.tsv"),
         mapping=str(INTERDIR / "01_dereplication" / "protein_cluster_map.tsv"),
+        protein_to_genome=str(INTERDIR / "00_preprocessing" / "protein_to_genome.tsv"),
     output:
         matrix=str(OUTDIR / "trait_matrix_combined.tsv"),
         provenance=str(OUTDIR / "trait_provenance.tsv"),
@@ -267,6 +271,7 @@ rule nise_detection:
         homology_resolved=str(INTERDIR / "02_homology" / "resolved_homology.tsv"),
         structure_results=str(INTERDIR / "03_structure" / "structure_results.tsv"),
         orthogroups=str(INTERDIR / "02_homology" / "orthogroups.tsv"),
+        protein_to_genome=str(INTERDIR / "00_preprocessing" / "protein_to_genome.tsv"),
     output:
         candidates=str(OUTDIR / "nise_candidates.tsv"),
         summary=str(INTERDIR / "05_nise" / "nise_summary.json"),

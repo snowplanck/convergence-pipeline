@@ -8,11 +8,15 @@ import json
 import time
 from collections import defaultdict
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+import genome_utils
 
 trait_matrix_in = snakemake.input["trait_matrix"]
 homology_in = snakemake.input["homology_resolved"]
 structure_in = snakemake.input["structure_results"]
 orthogroups_in = snakemake.input["orthogroups"]
+protein_to_genome_in = snakemake.input["protein_to_genome"]
 candidates_out = snakemake.output["candidates"]
 summary_out = snakemake.output["summary"]
 min_tools = int(snakemake.params["min_tools"])
@@ -23,9 +27,7 @@ Path(summary_out).parent.mkdir(parents=True, exist_ok=True)
 Path(log_file).parent.mkdir(parents=True, exist_ok=True)
 t0 = time.time()
 
-def genome_of(pid):
-    return pid.rsplit("_", 1)[0] if "_" in pid else pid.rsplit("|", 1)[0]
-
+p2g_map = genome_utils.load_protein_to_genome(protein_to_genome_in)
 # Read orthogroups -> protein to OG
 prot2og = {}
 with open(orthogroups_in) as f:
@@ -34,10 +36,11 @@ with open(orthogroups_in) as f:
         cols = line.strip().split("\t")
         if len(cols) >= 2:
             og_id = cols[0]
-            for mem in cols[1:]:
-                mem = mem.strip()
-                if mem:
-                    prot2og[mem] = og_id
+            for cell in cols[1:]:
+                for mem in cell.split(","):
+                    mem = mem.strip()
+                    if mem:
+                        prot2og[mem] = og_id
 
 # Read structure results
 struct = {}
@@ -101,7 +104,7 @@ for func, prots in func_to_prots.items():
         continue
 
     confidence = min(1.0, n_folds * 0.3 + n_ogs * 0.15)
-    involved = sorted(set(genome_of(p) for p in prots))
+    involved = sorted(set(genome_utils.resolve_genome(p, p2g_map, log_file) for p in prots))
 
     candidates.append({
         "function": func,

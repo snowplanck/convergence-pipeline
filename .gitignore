@@ -29,3 +29,12 @@ env/
 # Conda / model caches
 .conda/
 conda_pkgs/
+
+# Real genome data and downloaded reference databases (too large for git)
+data/real_genomes/
+databases/
+tmp/
+
+# Compiled binaries are machine/CPU-specific (see: AVX2 vs SSE4.1 issue) - each
+# environment should download its own compatible build, not version one here.
+tools/foldseek/bin/foldseek

@@ -4,11 +4,15 @@ Produces representative FASTA + protein->cluster->genome mapping table."""
 import subprocess
 import time
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+import genome_utils
 
 rep_proteins_out = snakemake.output["rep_proteins"]
 mapping_out = snakemake.output["mapping"]
 stats_out = snakemake.output["stats"]
 proteins_in = snakemake.input["proteins"]
+protein_to_genome_in = snakemake.input["protein_to_genome"]
 threads = snakemake.threads
 min_id = snakemake.params["identity"]
 log_file = snakemake.log[0]
@@ -68,15 +72,14 @@ else:
     for pid in proteins:
         clusters[pid] = [pid]
 
-def genome_of(pid):
-    return pid.rsplit("_", 1)[0] if "_" in pid else pid.rsplit("|", 1)[0]
+p2g_map = genome_utils.load_protein_to_genome(protein_to_genome_in)
 
 # Write mapping table
 with open(mapping_out, "w") as f:
     f.write("protein_id\trepresentative_cluster_id\tgenome_id\n")
     for rep, members in clusters.items():
         for mem in members:
-            f.write(f"{mem}\t{rep}\t{genome_of(mem)}\n")
+            f.write(f"{mem}\t{rep}\t{genome_utils.resolve_genome(mem, p2g_map, log_file)}\n")
 
 # Write representative FASTA
 with open(rep_proteins_out, "w") as f:

@@ -6,9 +6,13 @@ import subprocess
 import time
 from pathlib import Path
 
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
 import tool_utils as tu
+import genome_utils
 
 rep_proteins = snakemake.input["rep_proteins"]
+protein_to_genome_in = snakemake.input["protein_to_genome"]
 orthogroups_out = snakemake.output["orthogroups"]
 gene_count_out = snakemake.output["gene_count"]
 homology_results_out = snakemake.output["homology_results"]
@@ -35,8 +39,7 @@ for p in [orthogroups_out, gene_count_out, homology_results_out,
 Path(log_file).parent.mkdir(parents=True, exist_ok=True)
 t0 = time.time()
 
-def genome_of(pid):
-    return pid.rsplit("_", 1)[0] if "_" in pid else pid.rsplit("|", 1)[0]
+p2g_map = genome_utils.load_protein_to_genome(protein_to_genome_in)
 
 # Read proteins
 proteins = []
@@ -45,8 +48,10 @@ with open(rep_proteins) as f:
         if line.startswith(">"):
             proteins.append(line[1:].split()[0].strip())
 
-genomes = sorted(set(genome_of(p) for p in proteins))
 with open(log_file, "w") as log:
+    pass  # truncate/create; genome_utils.resolve_genome() may append warnings below
+genomes = sorted(set(genome_utils.resolve_genome(p, p2g_map, log_file) for p in proteins))
+with open(log_file, "a") as log:
     log.write(f"Annotating {len(proteins)} proteins from {len(genomes)} genomes\n")
 
 # ---- Startup: verify each external tool binary + required database ----
@@ -73,7 +78,31 @@ try:
     of_input = of_dir / "input"
     of_input.mkdir(parents=True, exist_ok=True)
     import shutil
-    shutil.copy(rep_proteins, of_input / "rep_proteins.faa")
+    # OrthoFinder requires ONE FASTA FILE PER GENOME/SPECIES in the input
+    # directory -- a single combined file is treated as "1 species" and
+    # OrthoFinder refuses to run ("At least two species are required").
+
+    _per_genome_seqs = {}
+    _cur_id, _cur_seq = None, []
+    with open(rep_proteins) as _fh:
+        for _line in _fh:
+            if _line.startswith(">"):
+                if _cur_id is not None:
+                    _per_genome_seqs.setdefault(
+                        genome_utils.resolve_genome(_cur_id, p2g_map, log_file), []).append(
+                        (_cur_id, "".join(_cur_seq)))
+                _cur_id = _line[1:].split()[0].strip()
+                _cur_seq = []
+            else:
+                _cur_seq.append(_line.strip())
+        if _cur_id is not None:
+            _per_genome_seqs.setdefault(
+                genome_utils.resolve_genome(_cur_id, p2g_map, log_file), []).append(
+                (_cur_id, "".join(_cur_seq)))
+    for _g, _items in _per_genome_seqs.items():
+        with open(of_input / f"{_g}.faa", "w") as _gf:
+            for _pid, _seq in _items:
+                _gf.write(f">{_pid}\n{_seq}\n")
     subprocess.run(["orthofinder", "-f", str(of_input), "-t", str(threads),
                     "-a", str(threads), "-og"], check=True, capture_output=True, text=True)
     of_results = of_input / "OrthoFinder"
@@ -81,10 +110,30 @@ try:
     result_dirs = list(of_results.glob("Results_*")) if of_results.exists() else []
     if result_dirs:
         rd = result_dirs[0]
-        if (rd / "Orthogroups.tsv").exists():
-            shutil.copy(rd / "Orthogroups.tsv", orthogroups_out)
-        if (rd / "Orthogroups.GeneCountMatrix.csv").exists():
-            shutil.copy(rd / "Orthogroups.GeneCountMatrix.csv", gene_count_out)
+        # OrthoFinder versions differ in where these files live and how
+        # the gene-count file is named -- check both the old flat layout
+        # and the newer "Orthogroups/" subfolder layout.
+        _orthogroups_candidates = [
+            rd / "Orthogroups.tsv",
+            rd / "Orthogroups" / "Orthogroups.tsv",
+        ]
+        _genecount_candidates = [
+            rd / "Orthogroups.GeneCountMatrix.csv",
+            rd / "Orthogroups" / "Orthogroups.GeneCount.tsv",
+            rd / "Orthogroups" / "Orthogroups.GeneCountMatrix.csv",
+        ]
+        _found_og = next((p for p in _orthogroups_candidates if p.exists()), None)
+        _found_gc = next((p for p in _genecount_candidates if p.exists()), None)
+        if _found_og:
+            shutil.copy(_found_og, orthogroups_out)
+        else:
+            with open(log_file, "a") as log:
+                log.write(f"WARNING: Orthogroups.tsv not found in any of {_orthogroups_candidates}\n")
+        if _found_gc:
+            shutil.copy(_found_gc, gene_count_out)
+        else:
+            with open(log_file, "a") as log:
+                log.write(f"WARNING: gene count file not found in any of {_genecount_candidates}\n")
     with open(log_file, "a") as log:
         log.write("OrthoFinder: success\n")
     tu.record_tool(tool_report, "orthofinder", "A", True,
@@ -98,7 +147,7 @@ except Exception as e:
     with open(orthogroups_out, "w") as f:
         f.write("orthogroup\t" + "\t".join(genomes) + "\n")
         for i, g in enumerate(genomes):
-            g_prots = [p for p in proteins if genome_of(p) == g]
+            g_prots = [p for p in proteins if genome_utils.resolve_genome(p, p2g_map, log_file) == g]
             members = "\t".join(g_prots[:5])  # first 5 per genome
             f.write(f"OG_placeholder_{i}\t" + members + "\n")
     with open(gene_count_out, "w") as f:
@@ -136,7 +185,15 @@ except Exception as e:
 
 # ---- KofamScan ----
 try:
+    kofam_profiles = str(Path(kofam_dir) / "profiles")
+    kofam_ko_list = str(Path(kofam_dir) / "ko_list")
+    if not kofam_dir or not Path(kofam_profiles).exists() or not Path(kofam_ko_list).exists():
+        raise FileNotFoundError(
+            f"KofamScan profiles/ko_list not found under kofam_dir={kofam_dir!r} "
+            f"(expected {kofam_profiles} and {kofam_ko_list})"
+        )
     subprocess.run(["exec_annotation", "-f", "detail-tsv", "--cpu", str(threads),
+                    "-p", kofam_profiles, "-k", kofam_ko_list,
                     "-o", kofam_out, rep_proteins], check=True, capture_output=True, text=True)
     with open(log_file, "a") as log:
         log.write("KofamScan: success\n")
