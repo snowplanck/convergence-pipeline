@@ -109,7 +109,13 @@ try:
     # Find results dir
     result_dirs = list(of_results.glob("Results_*")) if of_results.exists() else []
     if result_dirs:
-        rd = result_dirs[0]
+        # OrthoFinder names result folders by date (e.g. Results_Sep06,
+        # Results_Sep06_1 on a second same-day run) -- always pick the most
+        # recently modified one, never just the first glob match.
+        rd = max(result_dirs, key=lambda p: p.stat().st_mtime)
+        with open(log_file, "a") as log:
+            log.write(f"OrthoFinder result dirs found: {[str(d) for d in result_dirs]}; "
+                       f"using most recent: {rd}\n")
         # OrthoFinder versions differ in where these files live and how
         # the gene-count file is named -- check both the old flat layout
         # and the newer "Orthogroups/" subfolder layout.
@@ -254,8 +260,17 @@ if Path(kofam_out).exists():
             if line.startswith("#") or not line.strip():
                 continue
             cols = line.rstrip("\n").split("\t")
-            if cols and cols[0] != "protein":
-                kofam_data[cols[0]] = cols
+            # Real KofamScan output has a leading significance-marker column
+            # ("*" for hits above threshold, empty otherwise) before the
+            # protein ID -- cols[0] is that marker, cols[1] is the protein.
+            # The lightweight test-mode placeholder never had this extra
+            # column, which is why this misalignment went unnoticed until a
+            # real-data run.
+            if len(cols) < 2:
+                continue
+            protein_id = cols[1]
+            if protein_id and protein_id != "gene name":
+                kofam_data[protein_id] = cols[1:]  # re-index without the marker column
 
 interpro_data = {}
 if Path(interpro_out).exists():
