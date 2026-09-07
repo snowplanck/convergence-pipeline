@@ -1,169 +1,143 @@
 # Function-Based Convergence Detection Pipeline
 
-A Snakemake + Streamlit bioinformatics pipeline that extends traditional
-identity-based core genome analysis with structure-based, homology-independent
-function prediction to detect **functional convergence** (Non-homologous
+A Snakemake pipeline that extends traditional identity-based core genome analysis
+with structure-based, homology-independent function prediction, to detect
+**functional convergence** between non-homologous genes — cases where unrelated
+proteins independently evolve the same biological function (Non-homologous
 Isofunctional Enzymes, NISE).
 
 ## Architecture
+Genomes → Module 0 (Prokka + explicit locus-tag + protein→genome mapping)
+→ Module 1 (protein dereplication, MMseqs2)
+→ Module 2 — Branch A: homology annotation (OrthoFinder, eggNOG-mapper,
+KofamScan, InterProScan — cheap, tried for ALL proteins)
+→ Module 3 — Branch B: staged structure annotation (triage cascade)
+├─ B1: sequence-only ML (ProteInfer/CLEAN)
+├─ B2: ProstT5 → 3Di → Foldseek structural search
+└─ B3: full 3D fold (ESMFold/ColabFold) + DeepFRI — EXPENSIVE, last resort
+→ Module 4: combined genome × trait matrix (with evidence provenance)
+→ Module 5: NISE / convergence detection
+→ Module 6: functional vs. identity-based clustering comparison
+→ Module 7: validation (synthetic + literature positive controls)
 
-```
-Genomes → Module 0 (preprocess)
-        → Module 1 (dereplicate)
-        → Module 2 — Branch A: homology annotation (cheap, ALL proteins)
-              └─ Triage point
-        → Module 3 — Branch B: staged structure annotation
-              ├─ B1: sequence-only ML (ProteInfer/CLEAN) — cheap GPU
-              ├─ B2: ProstT5 → 3Di → Foldseek — cheap GPU
-              └─ B3: full 3D fold (ESMFold/ColabFold + DeepFRI) — EXPENSIVE GPU
-        → Module 4: trait matrix
-        → Module 5: NISE detection
-        → Module 6: clustering comparison
-        → Module 7: validation
-```
+Each expensive stage only processes the residual (unresolved) output of the
+cheaper stage before it — never the full protein set.
 
-Each expensive rule's input is the **residual** of the cheaper rule before it,
-never the full protein set. This is enforced as first-class DAG edges.
+## Hardware requirements (realistic, learned the hard way)
 
-## System requirements
+- **No GPU required.** All stages run on CPU. If a GPU is present, ProstT5/ESMFold/
+  DeepFRI auto-detect and use it (`torch.cuda.is_available()`); if not, they fall
+  back to CPU automatically.
+- **RAM**: KofamScan against ~28,000 HMM profiles on real bacterial proteomes is
+  memory-hungry when run with many parallel threads. 8GB total system RAM (shared
+  with the OS) risks the Linux OOM-killer terminating `hmmsearch` mid-run,
+  especially with `--cpu 4`. Prefer 16GB+ if available, or reduce `--cpu`/`--cores`
+  on constrained machines.
+- **Disk**: reference databases (KofamScan profiles, Foldseek CATH50) total several
+  GB. Full-scale runs also generate substantial intermediate output per genome.
+- **CPU instruction set matters for pre-compiled binaries.** The official Foldseek
+  static binary is compiled for a specific instruction set (AVX2, SSE4.1, or SSE2).
+  Copying a binary built on one machine to another with an older/different CPU can
+  fail with `Illegal instruction (core dumped)`. Check with
+  `cat /proc/cpuinfo | grep -o avx2` / `grep -o sse4_1` and download the matching
+  build from `https://mmseqs.com/foldseek/foldseek-linux-<variant>.tar.gz`.
+- **Old Linux distributions (GLIBC compatibility).** `environments/ml.yml` installs
+  a **CPU-only** PyTorch build deliberately — the default `pytorch-cuda` build pulls
+  in CUDA runtime libraries that require GLIBC ≥ 2.27, which is not available on
+  older systems (e.g. Ubuntu 16.04, GLIBC 2.23), even when no GPU is used. Do not
+  reintroduce the `nvidia` channel / `pytorch-cuda` dependency unless you also
+  confirm the target system's GLIBC version.
+- **No sudo/root needed.** Everything installs via Conda/Mamba into the user's home
+  directory.
 
-- Linux or macOS workstation with NVIDIA GPU (≥8GB VRAM)
-- Conda or Mamba
-- ~50GB free disk for databases
-- Snakemake ≥8.0
-
-## Setup
-
-```bash
-# 1. Install the GUI dependencies
-pip install -r requirements.txt
-
-# 2. Create Conda environments (one-time)
-conda env create -f environments/annotation.yml
-conda env create -f environments/ml.yml
-conda env create -f environments/r.yml
-
-# 3. Generate the toy dataset
-python scripts/generate_toy_data_standalone.py
-
-# 4. Download/reference databases (one-time; cached for reuse)
-# AlphaFold DB:
-mkdir -p databases/alphafold
-# Download per-organism from https://alphafold.ebi.ac.uk/
-
-# Foldseek databases:
-mkdir -p databases/foldseek
-foldseek databases CATH databases/foldseek/cath tmp
-# Also: SCOP, PDB, UniProt50
-
-# eggNOG:
-download_eggnog_data.py -y -P -M
-```
-
-### Real-mode tool & database requirements
-
-`test_mode=false` runs the genuine tools below. Any tool that is missing
-(or whose database is missing) is reported as **NOT AVAILABLE** in
-`results/tool_availability.tsv` and its proteins are honestly marked
-*unresolved / no-hit* — the pipeline never fabricates a positive annotation.
-
-| Module | Tool | Install | Required database | If missing |
-|--------|------|---------|------------------|------------|
-| Branch A | OrthoFinder | `conda install -c bioconda orthofinder` | — (uses input FASTA) | placeholder OGs |
-| Branch A | eggNOG-mapper | `conda install -c bioconda eggnog-mapper` | `eggnog_db` (`download_eggnog_data.py`) | no-hit |
-| Branch A | KofamScan | `conda install -c bioconda kofamscan` | `kofam_dir` (`kofamscan --download`) | no-hit |
-| Branch A | InterProScan | `conda install -c bioconda interproscan` | bundled | no-hit |
-| Branch B1 | ProteInfer / CLEAN | install + put CLI on `PATH` (or set `external_tools_dir`) | none | no-hit |
-| Branch B2 | ProstT5 (GPU/CPU auto) | `transformers` + `Rostlab/prostt5` weights | — | no-hit |
-| Branch B2 | Foldseek | `conda install -c bioconda foldseek` | `foldseek_db` (see below) | **hard fail** (logged command) |
-| Branch B3 | AlphaFold DB (checked first) | download per-organism mmCIF/PDB | `alphafold_db` | fall through to folding |
-| Branch B3 | ESMFold (GPU/CPU auto) | `transformers` + `fair-esm` | — | no-hit |
-| Branch B3 | ColabFold/AlphaFold2 (only if `b3_method=colabfold`) | `colabfold_predict` on PATH | UniRef/MMCIF DBs | no-hit |
-| Branch B3 | DeepFRI / CLEAN-Contact | install + CLI/`clean` package | — | EC/GO omitted (not fabricated) |
-
-Foldseek reference databases (download once; point `foldseek_db` at the dir):
+## Installation
 
 ```bash
-foldseek databases PDB databases/foldseek/pdb tmp
-foldseek databases CATH databases/foldseek/cath tmp
-foldseek databases SCOPe databases/foldseek/scope tmp
-foldseek databases AlphaFoldDB databases/foldseek/afdb tmp
+# 1. Install Miniforge (Conda + Mamba) if not already available
+wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+bash Miniforge3-Linux-x86_64.sh
+
+# 2. Create the three Conda environments
+mamba env create -f environments/annotation.yml
+mamba env create -f environments/ml.yml
+mamba env create -f environments/r.yml
+mamba install -n base -c bioconda -c conda-forge "snakemake>=8" -y
+
+# 3. Download reference databases (one-time; NOT stored in this repo)
+mkdir -p databases/kofam && cd databases/kofam
+wget https://www.genome.jp/ftp/db/kofam/profiles.tar.gz
+wget https://www.genome.jp/ftp/db/kofam/ko_list.gz
+tar xzf profiles.tar.gz && gunzip ko_list.gz
+cd ../..
+
+mkdir -p databases/foldseek/v4
+foldseek databases CATH50 databases/foldseek/v4 tmp   # NOTE: "CATH50", not "CATH"
+
+# eggNOG-mapper database download is currently broken upstream (the documented
+# eggnogdb.embl.de host is decommissioned; the eggnog5.embl.de replacement has
+# also been reported returning 404s as of early 2026). The pipeline runs fine
+# without it — eggNOG-mapper will honestly report "unavailable" rather than
+# fabricate results. Revisit if/when upstream fixes this.
+
+# 4. Get a Foldseek binary matching your CPU
+cat /proc/cpuinfo | grep -o avx2 | head -1    # if this prints "avx2", use avx2 below
+wget https://mmseqs.com/foldseek/foldseek-linux-sse41.tar.gz   # or -avx2 / -sse2
+mkdir -p tools && tar xvzf foldseek-linux-sse41.tar.gz -C tools/
 ```
 
-Device handling: every GPU-capable step (ProstT5, ESMFold, DeepFRI) calls
-`torch.cuda.is_available()` and uses the GPU automatically when present, CPU
-otherwise. No ROCm path is assumed. Override with `force_device: auto|cpu|cuda`.
+## Running
 
-The expensive B3 folding stage is protected by `b3_per_protein_timeout`
-(default 1800 s); a single pathological protein that times out is marked
-unresolved and the run continues.
-
-## Running in test mode (recommended first run)
-
-Test mode stubs GPU-heavy steps (ESMFold, DeepFRI) with fast mocks so the
-full DAG can be validated in minutes without a GPU or large downloads.
-
+**Test mode** (fast, synthetic toy genomes, validates the whole pipeline in minutes):
 ```bash
-# Via the GUI:
-streamlit run app.py
-# → Setup page: point genome_dir to data/toy_genomes, enable test_mode
-# → Run page: Start pipeline
-
-# Or directly:
 snakemake --cores 4 --software-deployment-method conda \
-          --conda-frontend mamba \
           --config test_mode=true genome_dir=data/toy_genomes
 ```
 
-The toy dataset includes two synthetic positive controls:
-- **NISE case**: proteins NISE_A and NISE_B — different sequences, different folds,
-  same EC:3.4.21.1 → MUST appear in `nise_candidates.tsv`
-- **Homologous case**: HOM_amylase_1 and HOM_amylase_2 — 95% identity, same OG,
-  EC:3.2.1.1 → MUST NOT appear in `nise_candidates.tsv`
-
-## Running at full scale
-
+**Real mode** (actual genomes, all real tools attempted):
 ```bash
-snakemake --cores 8 --software-deployment-method conda \
-          --conda-frontend mamba --resources gpu=1 \
-          --config test_mode=false genome_dir=/path/to/genomes
+nice -n 10 snakemake --cores <N> --software-deployment-method conda \
+          --config test_mode=false genome_dir=data/your_genomes
 ```
+Use `nice` and a conservative `--cores` value on shared/multi-user servers.
+For long runs, use `tmux`/`screen` (or `nohup ... & disown`) so the run survives
+an SSH disconnect.
 
-The `--resources gpu=1` flag gates GPU rules (B2, B3) so Snakemake schedules
-them correctly on a GPU node.
-
-## Outputs
-
-| File | Schema |
-|------|--------|
-| `results/orthogroups.tsv` | orthogroup × genome presence/absence |
-| `results/trait_matrix_combined.tsv` | trait × genome counts |
-| `results/trait_provenance.tsv` | includes provenance column |
-| `results/nise_candidates.tsv` | includes confidence 0–1 |
-| `results/functional_clusters.tsv` | genome × function cluster |
-| `results/identity_clusters.tsv` | genome × identity cluster |
-| `results/validation_report.md` | positive-control recovery |
-| `results/pipeline_run_stats.tsv` | stage × proteins_in/out × time × use_gpu |
-
-## Running schema tests
+## Validation
 
 ```bash
+mamba install -n base -c conda-forge pytest -y
 RUN_PIPELINE_BEFORE_TEST=1 pytest tests/test_schemas.py -v
 ```
+Validates output schemas and two synthetic positive controls: a non-homologous
+convergent pair (must be flagged as NISE) and a homologous pair (must not be).
 
-This runs the pipeline in test mode then validates all 7 output files.
+## Key design notes / hard-won lessons
 
-## GUI pages
+- **Genome identity is resolved via an explicit mapping file**
+  (`results/intermediate/00_preprocessing/protein_to_genome.tsv`), generated once
+  during preprocessing from Prokka's own output (with an explicit, sanitized
+  `--locustag` per genome). Do not reintroduce heuristic genome-from-protein-ID
+  guessing (e.g. splitting on the last `_`) anywhere else — Prokka's
+  auto-generated locus tags have no relationship to genome file names, and any
+  such guessing will silently misattribute genes to the wrong "genome".
+- **Real OrthoFinder's `Orthogroups.tsv` contains multiple comma-separated gene
+  IDs per cell** (unlike the single-gene-per-cell placeholder used when
+  OrthoFinder is unavailable). Any code reading this file must split each cell on
+  `,` before treating entries as individual gene IDs.
+- **OrthoFinder requires one FASTA file per genome** in its input directory — a
+  single combined file is treated as "1 species" and OrthoFinder refuses to run.
+- Newer OrthoFinder versions place `Orthogroups.tsv` and the gene-count file
+  inside an `Orthogroups/` subfolder, and renamed
+  `Orthogroups.GeneCountMatrix.csv` to `Orthogroups.GeneCount.tsv`. The code
+  checks both layouts.
+- **Never fabricate a positive tool result as a fallback.** When a real
+  annotation tool is unavailable or fails, every fallback path writes a
+  genuinely empty/no-hit result and logs why — never a fake hit standing in for
+  a real one.
+- YAML scientific notation needs an explicit decimal point (`1.0e-5`, not
+  `1e-5`) or some YAML loaders read it as a string, not a float.
 
-- **Setup**: configure genome dir, thresholds, test mode
-- **Run**: launch pipeline, view live logs
-- **Monitor**: triage funnel chart + per-stage wall-clock bars (reads pipeline_run_stats.tsv)
-- **Results**: trait matrix + NISE candidates, filterable by provenance/confidence
-- **Validation**: renders validation_report.md + positive-control recovery
+## Databases and real genome data are not stored in this repository
 
-## Notes
-
-- `config.yaml` keys are kept in sync with `app.py`'s `config_overrides`.
-  Rename a key in both files together.
-- Rules with `resources: gpu=1` are B1, B2, B3 (Branch B stages).
-- Intermediate files go to `results/intermediate/`; final outputs to `results/`.
+See `.gitignore` — `databases/`, `data/real_genomes/`, and `tmp/` are excluded
+due to size. Re-download/regenerate them per the Installation section above.
