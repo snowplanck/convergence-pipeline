@@ -157,7 +157,13 @@ else:
                     # transformers-based ProstT5
                     import torch
                     from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-                    tok = AutoTokenizer.from_pretrained("Rostlab/prostt5")
+                    tok = AutoTokenizer.from_pretrained("Rostlab/prostt5", use_fast=False)
+                    # use_fast=False: the fast (Rust) tokenizer implementation
+                    # mis-detects this SentencePiece model's algorithm on some
+                    # transformers/tokenizers version combinations, raising
+                    # "trying to run a Unigram model but trained with a
+                    # different algorithm". The slow (pure Python) tokenizer
+                    # reads the same file correctly.
                     model = AutoModelForSeq2SeqLM.from_pretrained("Rostlab/prostt5")
                     dev = torch.device("cuda" if device == "cuda" else "cpu")
                     model = model.to(dev)
