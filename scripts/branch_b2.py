@@ -155,9 +155,11 @@ else:
                         three_di[p] = s
                 else:
                     # transformers-based ProstT5
+                    import re
                     import torch
                     from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-                    tok = AutoTokenizer.from_pretrained("Rostlab/prostt5", use_fast=False)
+                    tok = AutoTokenizer.from_pretrained("Rostlab/prostt5", use_fast=False,
+                                                         do_lower_case=False)
                     # use_fast=False: the fast (Rust) tokenizer implementation
                     # mis-detects this SentencePiece model's algorithm on some
                     # transformers/tokenizers version combinations, raising
@@ -167,11 +169,81 @@ else:
                     model = AutoModelForSeq2SeqLM.from_pretrained("Rostlab/prostt5")
                     dev = torch.device("cuda" if device == "cuda" else "cpu")
                     model = model.to(dev)
-                    for p, s in seqs.items():
-                        inp = tok(f">>3Di</>{s}", return_tensors="pt",
-                                  add_special_tokens=False).to(dev)
-                        out = model.generate(**inp, max_length=2000)
-                        three_di[p] = tok.batch_decode(out, skip_special_tokens=True)[0]
+                    model.eval()
+                    if dev.type == "cuda":
+                        model.half()  # half-precision speedup is GPU-only
+                    # else: CPU already loads in full precision (float32) by
+                    # default; .full() is not a real PyTorch method (unlike
+                    # .half(), which is), so there's nothing to call here.
+                    # CRITICAL: the input format below follows the model's
+                    # OFFICIAL documented usage (huggingface.co/Rostlab/ProstT5)
+                    # exactly. An earlier version of this code sent raw,
+                    # unspaced sequences with an invented ">>3Di</>" prefix --
+                    # that is not a format this model recognizes, and it
+                    # silently produced degenerate, repetitive garbage (e.g.
+                    # "M G G G G G G...") for every single input instead of
+                    # erroring. "It ran without an exception" is NOT sufficient
+                    # validation for a generative model -- always sanity-check
+                    # real output content, not just exit status.
+                    # Required format: uppercase AAs, rare residues (U,Z,O,B)
+                    # mapped to X, a single space between every residue, and
+                    # the "<AA2fold>" direction token prepended.
+                    # num_beams=3 (the official default) triples decoding
+                    # cost -- on CPU that is expensive. Allow trading some
+                    # quality for speed via an env var; default to 1 (no beam
+                    # search) for CPU-only environments like this one.
+                    _num_beams = int(os.environ.get("PROSTT5_NUM_BEAMS", "1"))
+                    gen_kwargs_aa2fold = {
+                        "do_sample": True,
+                        "num_beams": _num_beams,
+                        "top_p": 0.95,
+                        "temperature": 1.2,
+                        "top_k": 6,
+                        "repetition_penalty": 1.2,
+                    }
+                    # Batch inference instead of one protein at a time: a single
+                    # sequence per model.generate() call massively under-uses
+                    # CPU throughput for a ~3B-parameter Seq2Seq model. Batching
+                    # (with padding) lets the same forward passes cover many
+                    # sequences at once. Tune BATCH_SIZE down if this runs out
+                    # of memory on a given machine.
+                    BATCH_SIZE = int(os.environ.get("PROSTT5_BATCH_SIZE", "16"))
+                    # Sort by sequence length before batching: grouping similarly
+                    # sized proteins together avoids short sequences being stuck
+                    # waiting on one long outlier's extra decoding steps within
+                    # the same batch (generation is autoregressive -- a batch's
+                    # step count is bounded by its longest member).
+                    items = sorted(seqs.items(), key=lambda kv: len(kv[1]))
+                    with open(log_file, "a") as _lf:
+                        _lf.write(f"ProstT5: batching {len(items)} sequences, "
+                                  f"batch_size={BATCH_SIZE}\n")
+                    with torch.no_grad():
+                        for bstart in range(0, len(items), BATCH_SIZE):
+                            chunk = items[bstart:bstart + BATCH_SIZE]
+                            raw_seqs = [s.upper() for _, s in chunk]
+                            spaced = [" ".join(list(re.sub(r"[UZOB]", "X", s)))
+                                      for s in raw_seqs]
+                            prefixed = ["<AA2fold> " + s for s in spaced]
+                            ids = tok.batch_encode_plus(
+                                prefixed, add_special_tokens=True,
+                                padding="longest", return_tensors="pt").to(dev)
+                            min_len = min(len(s) for s in raw_seqs)
+                            max_len = max(len(s) for s in raw_seqs)
+                            out = model.generate(
+                                ids.input_ids, attention_mask=ids.attention_mask,
+                                max_length=max_len + 5,
+                                min_length=max(1, min_len - 5),
+                                early_stopping=True, num_return_sequences=1,
+                                **gen_kwargs_aa2fold)
+                            decoded = tok.batch_decode(out, skip_special_tokens=True)
+                            # Model output has spaces between 3Di tokens too --
+                            # strip them to get the plain 3Di string.
+                            decoded = ["".join(d.split(" ")) for d in decoded]
+                            for (p, _), d in zip(chunk, decoded):
+                                three_di[p] = d
+                            with open(log_file, "a") as _lf:
+                                _lf.write(f"ProstT5: processed {min(bstart + BATCH_SIZE, len(items))}"
+                                          f"/{len(items)}\n")
 
                 # Write 3Di FASTA and search with Foldseek.
                 three_di_faa = td / "query.3di.faa"
